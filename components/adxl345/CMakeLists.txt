@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "adxl345.c"
     INCLUDE_DIRS "."
-    REQUIRES driver
+    REQUIRES hal_i2c
 )
