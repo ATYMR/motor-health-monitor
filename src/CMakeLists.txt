@@ -6,4 +6,5 @@ idf_component_register(
         adxl345
         sensor_manager
         health_engine
+        signal_processing
 )

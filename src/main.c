@@ -12,6 +12,7 @@
 #include "adxl345.h"
 #include "sensor_manager.h"
 #include "health_engine.h"
+#include "signal_processing.h"
 
 
 #define SAMPLE_RATE_HZ             100
@@ -66,7 +67,7 @@ void app_main(void)
     printf("\n");
     printf("========================================\n");
     printf("          OCTARIAN INSIGHT\n");
-    printf(" DATA_READY Synchronized Acquisition\n");
+    printf(" VIBRATION ANALYSIS V1\n");
     printf("========================================\n\n");
 
 
@@ -138,13 +139,19 @@ void app_main(void)
     );
 
     printf(
-        "Window Size : %d fresh samples\n\n",
+        "Window Size : %d fresh samples\n",
         WINDOW_SIZE
+    );
+
+    printf(
+        "Frequency Resolution : %.2f Hz\n\n",
+        (float)SAMPLE_RATE_HZ /
+        (float)WINDOW_SIZE
     );
 
 
     /*------------------------------------------------------
-     * Sample windows
+     * Raw sample windows
      *-----------------------------------------------------*/
 
     float x_window[WINDOW_SIZE];
@@ -154,6 +161,15 @@ void app_main(void)
     float z_window[WINDOW_SIZE];
 
     float magnitude_window[WINDOW_SIZE];
+
+
+    /*------------------------------------------------------
+     * Signal processing buffers
+     *-----------------------------------------------------*/
+
+    float magnitude_dc_removed[WINDOW_SIZE];
+
+    float magnitude_windowed[WINDOW_SIZE];
 
 
     /*------------------------------------------------------
@@ -177,6 +193,13 @@ void app_main(void)
 
 
     /*------------------------------------------------------
+     * Frequency analysis result structure
+     *-----------------------------------------------------*/
+
+    frequency_metrics_t frequency_metrics;
+
+
+    /*------------------------------------------------------
      * Main acquisition loop
      *-----------------------------------------------------*/
 
@@ -191,9 +214,6 @@ void app_main(void)
 
         /*
          * Start window timing.
-         *
-         * This measures the total time required
-         * to collect 100 fresh samples.
          */
 
         int64_t window_start_us =
@@ -213,6 +233,7 @@ void app_main(void)
             /*
              * DATA_READY timeout
              */
+
             if (err == ESP_ERR_TIMEOUT)
             {
                 ready_timeouts++;
@@ -222,9 +243,9 @@ void app_main(void)
 
 
             /*
-             * I2C or driver error while checking
-             * DATA_READY
+             * Error while checking DATA_READY
              */
+
             if (err != ESP_OK)
             {
                 read_errors++;
@@ -234,10 +255,7 @@ void app_main(void)
 
 
             /*
-             * Fresh sample available.
-             *
-             * Read acceleration through
-             * Sensor Manager.
+             * Fresh sample available
              */
 
             err = sensor_manager_read(
@@ -289,17 +307,13 @@ void app_main(void)
         }
 
 
-        /*
+        /*--------------------------------------------------
          * End window timing
-         */
+         *-------------------------------------------------*/
 
         int64_t window_end_us =
             esp_timer_get_time();
 
-
-        /*
-         * Convert microseconds to milliseconds
-         */
 
         float window_duration_ms =
             (window_end_us - window_start_us)
@@ -307,7 +321,7 @@ void app_main(void)
 
 
         /*--------------------------------------------------
-         * Analyze X axis
+         * Time-domain analysis
          *-------------------------------------------------*/
 
         esp_err_t x_result =
@@ -318,10 +332,6 @@ void app_main(void)
             );
 
 
-        /*--------------------------------------------------
-         * Analyze Y axis
-         *-------------------------------------------------*/
-
         esp_err_t y_result =
             health_engine_analyze(
                 y_window,
@@ -330,10 +340,6 @@ void app_main(void)
             );
 
 
-        /*--------------------------------------------------
-         * Analyze Z axis
-         *-------------------------------------------------*/
-
         esp_err_t z_result =
             health_engine_analyze(
                 z_window,
@@ -341,10 +347,6 @@ void app_main(void)
                 &z_metrics
             );
 
-
-        /*--------------------------------------------------
-         * Analyze magnitude
-         *-------------------------------------------------*/
 
         esp_err_t magnitude_result =
             health_engine_analyze(
@@ -372,13 +374,80 @@ void app_main(void)
 
 
         /*--------------------------------------------------
+         * Remove DC component
+         *-------------------------------------------------*/
+
+        esp_err_t dc_result =
+            signal_processing_remove_dc(
+                magnitude_window,
+                magnitude_dc_removed,
+                WINDOW_SIZE
+            );
+
+
+        if (dc_result != ESP_OK)
+        {
+            printf(
+                "ERROR: DC removal failed\n"
+            );
+
+            continue;
+        }
+
+
+        /*--------------------------------------------------
+         * Apply Hann window
+         *-------------------------------------------------*/
+
+        esp_err_t window_result =
+            signal_processing_apply_hann_window(
+                magnitude_dc_removed,
+                magnitude_windowed,
+                WINDOW_SIZE
+            );
+
+
+        if (window_result != ESP_OK)
+        {
+            printf(
+                "ERROR: Hann window failed\n"
+            );
+
+            continue;
+        }
+
+
+        /*--------------------------------------------------
+         * Frequency-domain analysis
+         *-------------------------------------------------*/
+
+        esp_err_t frequency_result =
+            signal_processing_analyze_frequency(
+                magnitude_windowed,
+                WINDOW_SIZE,
+                (float)SAMPLE_RATE_HZ,
+                &frequency_metrics
+            );
+
+
+        if (frequency_result != ESP_OK)
+        {
+            printf(
+                "ERROR: Frequency analysis failed\n"
+            );
+
+            continue;
+        }
+
+
+        /*--------------------------------------------------
          * Print diagnostic report
          *-------------------------------------------------*/
 
         printf("\n");
 
         printf(
-            "========== DATA_READY REPORT ==========\n"
+            "========== VIBRATION REPORT ==========\n"
         );
 
 
@@ -404,7 +473,7 @@ void app_main(void)
 
 
         printf(
-            "---------------------------------------\n"
+            "--------------------------------------\n"
         );
 
 
@@ -433,7 +502,37 @@ void app_main(void)
 
 
         printf(
-            "---------------------------------------\n"
+            "--------------------------------------\n"
+        );
+
+
+        if (frequency_metrics.valid_peak)
+        {
+        printf(
+        "Dominant Frequency : %.2f Hz\n",
+        frequency_metrics.dominant_frequency_hz
+        );
+
+        printf(
+        "Dominant Amplitude : %.5f g\n",
+        frequency_metrics.dominant_amplitude
+        );
+        }
+        else
+{
+    printf(
+        "Dominant Frequency : NONE\n"
+    );
+}
+
+printf(
+    "Frequency Confidence: %.2f\n",
+    frequency_metrics.confidence_ratio
+);
+
+
+        printf(
+            "--------------------------------------\n"
         );
 
 
@@ -463,7 +562,7 @@ void app_main(void)
 
 
         printf(
-            "=======================================\n"
+            "======================================\n"
         );
     }
 }
