@@ -4,6 +4,7 @@ idf_component_register(
     REQUIRES
         hal_i2c
         adxl345
+        ds18b20
         sensor_manager
         health_engine
         signal_processing
