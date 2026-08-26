@@ -1,10 +1,7 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "data_logger.c"
     INCLUDE_DIRS "."
     REQUIRES
-        hal_i2c
-        adxl345
-        sensor_manager
         health_engine
         signal_processing
         frequency_tracker
