@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "driver/gpio.h"
 #include "esp_err.h"
 
 
@@ -72,14 +73,33 @@
 
 /*
  * Interrupt bits
+ *
+ * DATA_READY = bit 7
  */
 #define ADXL345_INT_DATA_READY   0x80
 
 
 /*
- * Full-resolution scale factor
+ * ADXL345 INT1 is connected to ESP32 GPIO34.
  *
- * Approximately 3.9 mg/LSB
+ * GPIO34 is input-only, which is appropriate because
+ * the ADXL345 drives the interrupt signal into the ESP32.
+ *
+ * Physical board labels may show this as:
+ *
+ *     D34
+ *     34
+ *     GPIO34
+ *
+ * They refer to the same ESP32 GPIO number.
+ */
+#define ADXL345_INT1_GPIO        GPIO_NUM_34
+
+
+/*
+ * Full-resolution scale factor.
+ *
+ * Approximately 3.9 mg/LSB.
  */
 #define ADXL345_SCALE_FACTOR     0.0039f
 
@@ -88,35 +108,110 @@
  * Public API
  *---------------------------------------------------------*/
 
+/*
+ * Configure the ADXL345.
+ *
+ * This configures:
+ *  - Device identification
+ *  - Measurement range
+ *  - Output data rate
+ *  - DATA_READY interrupt source
+ *
+ * Measurement mode is intentionally enabled separately
+ * using adxl345_enable_measurement().
+ */
 esp_err_t adxl345_init(void);
 
 
+/*
+ * Read device ID.
+ */
 esp_err_t adxl345_get_device_id(
     uint8_t *id
 );
 
 
+/*
+ * Enable measurement mode.
+ */
 esp_err_t adxl345_enable_measurement(void);
 
 
+/*
+ * Configure measurement range / resolution.
+ *
+ * Example:
+ *
+ *     ADXL345_FULL_RES |
+ *     ADXL345_RANGE_2G
+ */
 esp_err_t adxl345_set_range(
     uint8_t range
 );
 
 
+/*
+ * Configure output data rate.
+ */
 esp_err_t adxl345_set_data_rate(
     uint8_t rate
 );
 
 
+/*
+ * Configure and enable DATA_READY.
+ *
+ * DATA_READY is explicitly routed to INT1.
+ */
 esp_err_t adxl345_enable_data_ready(void);
 
 
+/*
+ * Configure the ESP32 GPIO interrupt connected to
+ * the ADXL345 INT1 output.
+ *
+ * This function records the current task as the task
+ * that will receive DATA_READY notifications.
+ */
+esp_err_t adxl345_configure_data_ready_interrupt(
+    gpio_num_t gpio_num
+);
+
+
+/*
+ * Wait for one or more DATA_READY interrupt events.
+ *
+ * timeout_ms:
+ *     Maximum time to wait.
+ *
+ * event_count:
+ *     Number of DATA_READY events accumulated since
+ *     the previous wait.
+ *
+ * If event_count > 1, the acquisition task did not
+ * service each DATA_READY event individually.
+ */
+esp_err_t adxl345_wait_for_data_ready(
+    uint32_t timeout_ms,
+    uint32_t *event_count
+);
+
+
+/*
+ * Read the ADXL345 DATA_READY status directly.
+ *
+ * This is retained for diagnostics and polling-based
+ * testing. The main interrupt-driven acquisition path
+ * does not depend on this function.
+ */
 esp_err_t adxl345_is_data_ready(
     bool *ready
 );
 
 
+/*
+ * Read raw signed XYZ acceleration values.
+ */
 esp_err_t adxl345_read_xyz(
     int16_t *x,
     int16_t *y,
@@ -124,6 +219,9 @@ esp_err_t adxl345_read_xyz(
 );
 
 
+/*
+ * Read XYZ acceleration converted to g.
+ */
 esp_err_t adxl345_read_acceleration(
     float *x_g,
     float *y_g,
@@ -131,4 +229,4 @@ esp_err_t adxl345_read_acceleration(
 );
 
 
-#endif
+#endif /* ADXL345_H */

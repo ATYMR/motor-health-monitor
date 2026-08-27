@@ -9,6 +9,7 @@
  *  - Measurement mode configuration
  *  - XYZ raw acceleration reading
  *  - Acceleration conversion to g
+ *  - ESP32 DATA_READY interrupt support
  *
  * Used by Octarian Insight
  ******************************************************************************/
@@ -16,14 +17,73 @@
 #include "adxl345.h"
 #include "hal_i2c.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "driver/gpio.h"
 #include "esp_log.h"
 
 
 static const char *TAG = "ADXL345";
 
 
+/*
+ * Task that consumes DATA_READY notifications.
+ */
+static TaskHandle_t data_ready_task_handle = NULL;
+
+
+/*
+ * GPIO connected to ADXL345 INT1.
+ */
+static gpio_num_t data_ready_gpio = GPIO_NUM_NC;
+
+
 /*----------------------------------------------------------
- * Private Functions
+ * DATA_READY ISR
+ *---------------------------------------------------------*/
+
+static void IRAM_ATTR adxl345_data_ready_isr(
+    void *arg
+)
+{
+    (void)arg;
+
+    /*
+     * Safety check.
+     *
+     * The ISR should never normally run before
+     * the task handle is initialized.
+     */
+    if (data_ready_task_handle == NULL)
+    {
+        return;
+    }
+
+    BaseType_t higher_priority_task_woken =
+        pdFALSE;
+
+
+    /*
+     * Increment the task notification count.
+     *
+     * One DATA_READY interrupt = one notification.
+     */
+    vTaskNotifyGiveFromISR(
+        data_ready_task_handle,
+        &higher_priority_task_woken
+    );
+
+
+    if (higher_priority_task_woken)
+    {
+        portYIELD_FROM_ISR();
+    }
+}
+
+
+/*----------------------------------------------------------
+ * Private register helpers
  *---------------------------------------------------------*/
 
 static esp_err_t adxl345_read_register(
@@ -60,11 +120,13 @@ esp_err_t adxl345_init(void)
     uint8_t id = 0;
 
     esp_err_t err =
-        adxl345_get_device_id(&id);
+        adxl345_get_device_id(
+            &id
+        );
 
 
     /*
-     * Verify communication
+     * Verify communication.
      */
     if (err != ESP_OK)
     {
@@ -78,7 +140,7 @@ esp_err_t adxl345_init(void)
 
 
     /*
-     * Verify Device ID
+     * Verify Device ID.
      */
     if (id != ADXL345_DEVICE_ID)
     {
@@ -100,15 +162,13 @@ esp_err_t adxl345_init(void)
 
 
     /*
-     * Configure:
-     *
-     * FULL_RES = enabled
-     * Range    = +/-2g
+     * Configure full-resolution ±2 g mode.
      */
-    err = adxl345_set_range(
-        ADXL345_FULL_RES |
-        ADXL345_RANGE_2G
-    );
+    err =
+        adxl345_set_range(
+            ADXL345_FULL_RES |
+            ADXL345_RANGE_2G
+        );
 
 
     if (err != ESP_OK)
@@ -129,11 +189,12 @@ esp_err_t adxl345_init(void)
 
 
     /*
-     * Configure output data rate
+     * Configure output data rate.
      */
-    err = adxl345_set_data_rate(
-        ADXL345_RATE_100HZ
-    );
+    err =
+        adxl345_set_data_rate(
+            ADXL345_RATE_100HZ
+        );
 
 
     if (err != ESP_OK)
@@ -154,16 +215,20 @@ esp_err_t adxl345_init(void)
 
 
     /*
-     * Enable DATA_READY interrupt source
+     * Configure DATA_READY routing and enable
+     * the DATA_READY interrupt source.
+     *
+     * DATA_READY -> INT1
      */
-    err = adxl345_enable_data_ready();
+    err =
+        adxl345_enable_data_ready();
 
 
     if (err != ESP_OK)
     {
         ESP_LOGE(
             TAG,
-            "Failed to enable DATA_READY"
+            "Failed to configure DATA_READY"
         );
 
         return err;
@@ -172,32 +237,21 @@ esp_err_t adxl345_init(void)
 
     ESP_LOGI(
         TAG,
-        "DATA_READY enabled"
+        "DATA_READY enabled and routed to INT1"
     );
 
 
     /*
-     * Enable measurement mode
+     * IMPORTANT:
+     *
+     * Measurement mode is intentionally NOT enabled here.
+     *
+     * main.c must first configure the ESP32 GPIO interrupt
+     * and then explicitly enable measurement.
+     *
+     * This prevents DATA_READY events from being generated
+     * before the ESP32 interrupt path is ready.
      */
-    err = adxl345_enable_measurement();
-
-
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(
-            TAG,
-            "Failed to enable measurement mode"
-        );
-
-        return err;
-    }
-
-
-    ESP_LOGI(
-        TAG,
-        "Measurement mode enabled"
-    );
-
 
     return ESP_OK;
 }
@@ -230,10 +284,23 @@ esp_err_t adxl345_get_device_id(
 
 esp_err_t adxl345_enable_measurement(void)
 {
-    return adxl345_write_register(
-        REG_POWER_CTL,
-        ADXL345_MEASURE_MODE
-    );
+    esp_err_t err =
+        adxl345_write_register(
+            REG_POWER_CTL,
+            ADXL345_MEASURE_MODE
+        );
+
+
+    if (err == ESP_OK)
+    {
+        ESP_LOGI(
+            TAG,
+            "Measurement mode enabled"
+        );
+    }
+
+
+    return err;
 }
 
 
@@ -273,6 +340,33 @@ esp_err_t adxl345_set_data_rate(
 
 esp_err_t adxl345_enable_data_ready(void)
 {
+    esp_err_t err;
+
+
+    /*
+     * Explicitly route DATA_READY to INT1.
+     *
+     * For ADXL345:
+     *
+     * INT_MAP bit = 0
+     * -> interrupt goes to INT1
+     */
+    err =
+        adxl345_write_register(
+            REG_INT_MAP,
+            0x00
+        );
+
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+
+    /*
+     * Enable DATA_READY interrupt.
+     */
     return adxl345_write_register(
         REG_INT_ENABLE,
         ADXL345_INT_DATA_READY
@@ -281,7 +375,191 @@ esp_err_t adxl345_enable_data_ready(void)
 
 
 /*----------------------------------------------------------
+ * DATA_READY GPIO Interrupt
+ *---------------------------------------------------------*/
+
+esp_err_t adxl345_configure_data_ready_interrupt(
+    gpio_num_t gpio_num
+)
+{
+    if (gpio_num < 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+
+    /*
+     * Remember the task that will wait for the
+     * DATA_READY notifications.
+     */
+    data_ready_task_handle =
+        xTaskGetCurrentTaskHandle();
+
+
+    if (data_ready_task_handle == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+
+    /*
+     * GPIO34 is input-only.
+     *
+     * ADXL345 DATA_READY is an input signal
+     * to the ESP32, therefore this is appropriate.
+     */
+    gpio_config_t config =
+    {
+        .pin_bit_mask =
+            (1ULL << gpio_num),
+
+        .mode =
+            GPIO_MODE_INPUT,
+
+        .pull_up_en =
+            GPIO_PULLUP_DISABLE,
+
+        .pull_down_en =
+            GPIO_PULLDOWN_DISABLE,
+
+        .intr_type =
+            GPIO_INTR_POSEDGE
+    };
+
+
+    esp_err_t err =
+        gpio_config(
+            &config
+        );
+
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+
+    /*
+     * Install the shared GPIO ISR service.
+     */
+    err =
+        gpio_install_isr_service(
+            0
+        );
+
+
+    if (
+        err != ESP_OK &&
+        err != ESP_ERR_INVALID_STATE
+    )
+    {
+        return err;
+    }
+
+
+    /*
+     * Attach our DATA_READY ISR.
+     */
+    err =
+        gpio_isr_handler_add(
+            gpio_num,
+            adxl345_data_ready_isr,
+            NULL
+        );
+
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+
+    data_ready_gpio =
+        gpio_num;
+
+
+    ESP_LOGI(
+        TAG,
+        "DATA_READY interrupt configured on GPIO %d",
+        gpio_num
+    );
+
+
+    return ESP_OK;
+}
+
+
+/*----------------------------------------------------------
+ * Wait for DATA_READY
+ *---------------------------------------------------------*/
+
+esp_err_t adxl345_wait_for_data_ready(
+    uint32_t timeout_ms,
+    uint32_t *event_count
+)
+{
+    if (
+        data_ready_task_handle == NULL ||
+        data_ready_gpio == GPIO_NUM_NC ||
+        event_count == NULL
+    )
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+
+    TickType_t timeout_ticks =
+        pdMS_TO_TICKS(
+            timeout_ms
+        );
+
+
+    /*
+     * Protect against very small timeout
+     * converting to zero ticks.
+     */
+    if (
+        timeout_ms > 0 &&
+        timeout_ticks == 0
+    )
+    {
+        timeout_ticks = 1;
+    }
+
+
+    /*
+     * pdTRUE clears the notification value
+     * after retrieving it.
+     *
+     * The returned value is the number of
+     * DATA_READY events accumulated.
+     */
+    uint32_t events =
+        ulTaskNotifyTake(
+            pdTRUE,
+            timeout_ticks
+        );
+
+
+    if (events == 0)
+    {
+        return ESP_ERR_TIMEOUT;
+    }
+
+
+    *event_count =
+        events;
+
+
+    return ESP_OK;
+}
+
+
+/*----------------------------------------------------------
  * Check DATA_READY Status
+ *
+ * Retained for diagnostic/polling use.
+ * Not used by the interrupt-driven acquisition path.
  *---------------------------------------------------------*/
 
 esp_err_t adxl345_is_data_ready(
@@ -294,7 +572,8 @@ esp_err_t adxl345_is_data_ready(
     }
 
 
-    uint8_t interrupt_source = 0;
+    uint8_t interrupt_source =
+        0;
 
 
     esp_err_t err =
@@ -311,8 +590,10 @@ esp_err_t adxl345_is_data_ready(
 
 
     *ready =
-        (interrupt_source &
-         ADXL345_INT_DATA_READY) != 0;
+        (
+            interrupt_source &
+            ADXL345_INT_DATA_READY
+        ) != 0;
 
 
     return ESP_OK;
@@ -329,9 +610,11 @@ esp_err_t adxl345_read_xyz(
     int16_t *z
 )
 {
-    if (x == NULL ||
+    if (
+        x == NULL ||
         y == NULL ||
-        z == NULL)
+        z == NULL
+    )
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -340,11 +623,17 @@ esp_err_t adxl345_read_xyz(
     uint8_t data[6];
 
 
-    esp_err_t err = hal_i2c_read(
-        REG_DATAX0,
-        data,
-        sizeof(data)
-    );
+    /*
+     * Burst read:
+     *
+     * DATAX0 ... DATAZ1
+     */
+    esp_err_t err =
+        hal_i2c_read(
+            REG_DATAX0,
+            data,
+            sizeof(data)
+        );
 
 
     if (err != ESP_OK)
@@ -359,35 +648,42 @@ esp_err_t adxl345_read_xyz(
 
 
     /*
-     * ADXL345 data order:
-     *
-     * DATAX0 = X low byte
-     * DATAX1 = X high byte
-     *
-     * DATAY0 = Y low byte
-     * DATAY1 = Y high byte
-     *
-     * DATAZ0 = Z low byte
-     * DATAZ1 = Z high byte
+     * X
      */
+    *x =
+        (int16_t)(
+            (
+                (uint16_t)data[1] << 8
+            )
+            |
+            data[0]
+        );
 
 
-    *x = (int16_t)(
-        ((uint16_t)data[1] << 8) |
-        data[0]
-    );
+    /*
+     * Y
+     */
+    *y =
+        (int16_t)(
+            (
+                (uint16_t)data[3] << 8
+            )
+            |
+            data[2]
+        );
 
 
-    *y = (int16_t)(
-        ((uint16_t)data[3] << 8) |
-        data[2]
-    );
-
-
-    *z = (int16_t)(
-        ((uint16_t)data[5] << 8) |
-        data[4]
-    );
+    /*
+     * Z
+     */
+    *z =
+        (int16_t)(
+            (
+                (uint16_t)data[5] << 8
+            )
+            |
+            data[4]
+        );
 
 
     return ESP_OK;
@@ -404,9 +700,11 @@ esp_err_t adxl345_read_acceleration(
     float *z_g
 )
 {
-    if (x_g == NULL ||
+    if (
+        x_g == NULL ||
         y_g == NULL ||
-        z_g == NULL)
+        z_g == NULL
+    )
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -432,15 +730,18 @@ esp_err_t adxl345_read_acceleration(
 
 
     *x_g =
-        x_raw * ADXL345_SCALE_FACTOR;
+        x_raw *
+        ADXL345_SCALE_FACTOR;
 
 
     *y_g =
-        y_raw * ADXL345_SCALE_FACTOR;
+        y_raw *
+        ADXL345_SCALE_FACTOR;
 
 
     *z_g =
-        z_raw * ADXL345_SCALE_FACTOR;
+        z_raw *
+        ADXL345_SCALE_FACTOR;
 
 
     return ESP_OK;

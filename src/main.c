@@ -18,74 +18,50 @@
 #include "data_logger.h"
 
 
+/*----------------------------------------------------------
+ * Acquisition Configuration
+ *---------------------------------------------------------*/
+
 #define SAMPLE_RATE_HZ             100
 #define WINDOW_SIZE                100
 
-#define DATA_READY_POLL_MS         1
-#define DATA_READY_TIMEOUT_MS      50
+#define DATA_READY_TIMEOUT_MS      30
 
 #define CONSENSUS_TOLERANCE_HZ     1.0f
 
 
 /*----------------------------------------------------------
- * Static signal buffers
- *
- * Static storage avoids putting the large sample buffers
- * on the app_main task stack.
+ * Static Sample Buffers
  *---------------------------------------------------------*/
 
 static float x_window[WINDOW_SIZE];
+
 static float y_window[WINDOW_SIZE];
+
 static float z_window[WINDOW_SIZE];
+
 static float magnitude_window[WINDOW_SIZE];
 
+
+/*----------------------------------------------------------
+ * Signal Processing Buffers
+ *---------------------------------------------------------*/
+
 static float x_dc_removed[WINDOW_SIZE];
+
 static float y_dc_removed[WINDOW_SIZE];
+
 static float z_dc_removed[WINDOW_SIZE];
 
 static float x_windowed[WINDOW_SIZE];
+
 static float y_windowed[WINDOW_SIZE];
+
 static float z_windowed[WINDOW_SIZE];
 
 
 /*----------------------------------------------------------
- * Wait for fresh ADXL345 data
- *---------------------------------------------------------*/
-
-static esp_err_t wait_for_data_ready(void)
-{
-    bool ready = false;
-
-    int elapsed_ms = 0;
-
-    while (elapsed_ms < DATA_READY_TIMEOUT_MS)
-    {
-        esp_err_t err =
-            adxl345_is_data_ready(&ready);
-
-        if (err != ESP_OK)
-        {
-            return err;
-        }
-
-        if (ready)
-        {
-            return ESP_OK;
-        }
-
-        vTaskDelay(
-            pdMS_TO_TICKS(DATA_READY_POLL_MS)
-        );
-
-        elapsed_ms += DATA_READY_POLL_MS;
-    }
-
-    return ESP_ERR_TIMEOUT;
-}
-
-
-/*----------------------------------------------------------
- * Print frequency result for one axis
+ * Print Frequency Result
  *---------------------------------------------------------*/
 
 static void print_frequency_result(
@@ -93,15 +69,21 @@ static void print_frequency_result(
     const frequency_metrics_t *metrics
 )
 {
-    if (metrics->valid_peak)
+    if (
+        metrics->valid_peak
+    )
     {
         printf(
             "%s Axis | Freq: %.2f Hz | "
             "Amp: %.5f g | "
             "Conf: %.2f | VALID\n",
+
             axis_name,
+
             metrics->dominant_frequency_hz,
+
             metrics->dominant_amplitude,
+
             metrics->confidence_ratio
         );
     }
@@ -110,7 +92,9 @@ static void print_frequency_result(
         printf(
             "%s Axis | Freq: NONE | "
             "Conf: %.2f | INVALID\n",
+
             axis_name,
+
             metrics->confidence_ratio
         );
     }
@@ -118,7 +102,7 @@ static void print_frequency_result(
 
 
 /*----------------------------------------------------------
- * Calculate consensus frequency
+ * Calculate Consensus Frequency
  *
  * V1 rule:
  *
@@ -130,87 +114,246 @@ static bool calculate_consensus_frequency(
     const frequency_metrics_t *x,
     const frequency_metrics_t *y,
     const frequency_metrics_t *z,
-    float *consensus_frequency)
+    float *consensus_frequency
+)
 {
-    if (!x || !y || !z || !consensus_frequency) return false;
+    if (
+        x == NULL ||
+        y == NULL ||
+        z == NULL ||
+        consensus_frequency == NULL
+    )
+    {
+        return false;
+    }
+
 
     float frequencies[3];
+
     float confidences[3];
+
     int valid_count = 0;
 
-    if (x->valid_peak) {
-        frequencies[valid_count] = x->dominant_frequency_hz;
-        confidences[valid_count++] = x->confidence_ratio;
+
+    /*------------------------------------------------------
+     * Collect valid frequencies
+     *-----------------------------------------------------*/
+
+    if (x->valid_peak)
+    {
+        frequencies[valid_count] =
+            x->dominant_frequency_hz;
+
+        confidences[valid_count] =
+            x->confidence_ratio;
+
+        valid_count++;
     }
-    if (y->valid_peak) {
-        frequencies[valid_count] = y->dominant_frequency_hz;
-        confidences[valid_count++] = y->confidence_ratio;
+
+
+    if (y->valid_peak)
+    {
+        frequencies[valid_count] =
+            y->dominant_frequency_hz;
+
+        confidences[valid_count] =
+            y->confidence_ratio;
+
+        valid_count++;
     }
-    if (z->valid_peak) {
-        frequencies[valid_count] = z->dominant_frequency_hz;
-        confidences[valid_count++] = z->confidence_ratio;
+
+
+    if (z->valid_peak)
+    {
+        frequencies[valid_count] =
+            z->dominant_frequency_hz;
+
+        confidences[valid_count] =
+            z->confidence_ratio;
+
+        valid_count++;
     }
 
-    if (valid_count < 2) return false;
 
-    if (valid_count == 3) {
-        float min_f = frequencies[0];
-        float max_f = frequencies[0];
+    /*
+     * Need at least two axes.
+     */
+    if (valid_count < 2)
+    {
+        return false;
+    }
 
-        for (int i = 1; i < 3; i++) {
-            if (frequencies[i] < min_f) min_f = frequencies[i];
-            if (frequencies[i] > max_f) max_f = frequencies[i];
-        }
 
-        if ((max_f - min_f) <= (2.0f * CONSENSUS_TOLERANCE_HZ)) {
-            float weighted_sum = 0.0f;
-            float confidence_sum = 0.0f;
+    /*------------------------------------------------------
+     * Three-axis case
+     *-----------------------------------------------------*/
 
-            for (int i = 0; i < 3; i++) {
-                weighted_sum += frequencies[i] * confidences[i];
-                confidence_sum += confidences[i];
+    if (valid_count == 3)
+    {
+        float min_f =
+            frequencies[0];
+
+        float max_f =
+            frequencies[0];
+
+
+        for (int i = 1; i < 3; i++)
+        {
+            if (
+                frequencies[i] < min_f
+            )
+            {
+                min_f =
+                    frequencies[i];
             }
 
-            if (confidence_sum > 0.0f) {
-                *consensus_frequency = weighted_sum / confidence_sum;
+
+            if (
+                frequencies[i] > max_f
+            )
+            {
+                max_f =
+                    frequencies[i];
+            }
+        }
+
+
+        /*
+         * For three axes, require the full span
+         * to be no greater than twice the tolerance.
+         */
+        if (
+            (max_f - min_f) <=
+            (2.0f * CONSENSUS_TOLERANCE_HZ)
+        )
+        {
+            float weighted_sum =
+                0.0f;
+
+            float confidence_sum =
+                0.0f;
+
+
+            for (int i = 0; i < 3; i++)
+            {
+                weighted_sum +=
+                    frequencies[i] *
+                    confidences[i];
+
+                confidence_sum +=
+                    confidences[i];
+            }
+
+
+            if (
+                confidence_sum > 0.0f
+            )
+            {
+                *consensus_frequency =
+                    weighted_sum /
+                    confidence_sum;
+
                 return true;
             }
         }
     }
 
-    bool pair_found = false;
-    float best_pair_frequency = 0.0f;
-    float best_pair_confidence = 0.0f;
 
-    for (int i = 0; i < valid_count; i++) {
-        for (int j = i + 1; j < valid_count; j++) {
-            float difference = fabsf(frequencies[i] - frequencies[j]);
+    /*------------------------------------------------------
+     * Pairwise consensus
+     *-----------------------------------------------------*/
 
-            if (difference <= CONSENSUS_TOLERANCE_HZ) {
+    bool pair_found =
+        false;
+
+    float best_pair_frequency =
+        0.0f;
+
+    float best_pair_confidence =
+        0.0f;
+
+
+    for (
+        int i = 0;
+        i < valid_count;
+        i++
+    )
+    {
+        for (
+            int j = i + 1;
+            j < valid_count;
+            j++
+        )
+        {
+            float difference =
+                fabsf(
+                    frequencies[i] -
+                    frequencies[j]
+                );
+
+
+            if (
+                difference <=
+                CONSENSUS_TOLERANCE_HZ
+            )
+            {
                 float combined_confidence =
-                    confidences[i] + confidences[j];
+                    confidences[i] +
+                    confidences[j];
 
-                if (combined_confidence <= 0.0f) continue;
+
+                if (
+                    combined_confidence <= 0.0f
+                )
+                {
+                    continue;
+                }
+
 
                 float pair_frequency =
-                    ((frequencies[i] * confidences[i]) +
-                     (frequencies[j] * confidences[j])) /
+                    (
+                        (
+                            frequencies[i] *
+                            confidences[i]
+                        )
+                        +
+                        (
+                            frequencies[j] *
+                            confidences[j]
+                        )
+                    )
+                    /
                     combined_confidence;
 
-                if (!pair_found ||
-                    combined_confidence > best_pair_confidence) {
-                    best_pair_frequency = pair_frequency;
-                    best_pair_confidence = combined_confidence;
-                    pair_found = true;
+
+                if (
+                    !pair_found ||
+                    combined_confidence >
+                    best_pair_confidence
+                )
+                {
+                    best_pair_frequency =
+                        pair_frequency;
+
+                    best_pair_confidence =
+                        combined_confidence;
+
+                    pair_found =
+                        true;
                 }
             }
         }
     }
 
-    if (pair_found) {
-        *consensus_frequency = best_pair_frequency;
+
+    if (pair_found)
+    {
+        *consensus_frequency =
+            best_pair_frequency;
+
         return true;
     }
+
 
     return false;
 }
@@ -233,7 +376,7 @@ void app_main(void)
     );
 
     printf(
-        " PER-AXIS + CONSENSUS ANALYSIS V1\n"
+        " INTERRUPT SYNCHRONIZED ACQUISITION V2\n"
     );
 
     printf(
@@ -242,10 +385,12 @@ void app_main(void)
 
 
     /*------------------------------------------------------
-     * Initialize I2C bus
+     * Initialize I2C
      *-----------------------------------------------------*/
 
-    if (hal_i2c_init() != ESP_OK)
+    if (
+        hal_i2c_init() != ESP_OK
+    )
     {
         printf(
             "ERROR: Failed to initialize I2C bus\n"
@@ -256,12 +401,14 @@ void app_main(void)
 
 
     /*------------------------------------------------------
-     * Add ADXL345 to I2C bus
+     * Add ADXL345
      *-----------------------------------------------------*/
 
-    if (hal_i2c_add_device(
+    if (
+        hal_i2c_add_device(
             ADXL345_I2C_ADDR
-        ) != ESP_OK)
+        ) != ESP_OK
+    )
     {
         printf(
             "ERROR: Failed to add ADXL345 device\n"
@@ -272,10 +419,17 @@ void app_main(void)
 
 
     /*------------------------------------------------------
-     * Initialize ADXL345
+     * Configure ADXL345
+     *
+     * IMPORTANT:
+     *
+     * adxl345_init() configures the sensor but
+     * does NOT enable measurement mode yet.
      *-----------------------------------------------------*/
 
-    if (adxl345_init() != ESP_OK)
+    if (
+        adxl345_init() != ESP_OK
+    )
     {
         printf(
             "ERROR: Failed to initialize ADXL345\n"
@@ -286,10 +440,50 @@ void app_main(void)
 
 
     /*------------------------------------------------------
+     * Configure ESP32 DATA_READY interrupt
+     *-----------------------------------------------------*/
+
+    if (
+        adxl345_configure_data_ready_interrupt(
+            ADXL345_INT1_GPIO
+        ) != ESP_OK
+    )
+    {
+        printf(
+            "ERROR: Failed to configure ADXL345 "
+            "DATA_READY GPIO %d\n",
+            ADXL345_INT1_GPIO
+        );
+
+        return;
+    }
+
+
+    /*------------------------------------------------------
+     * Enable measurement only AFTER the ESP32 interrupt
+     * path is ready.
+     *-----------------------------------------------------*/
+
+    if (
+        adxl345_enable_measurement() != ESP_OK
+    )
+    {
+        printf(
+            "ERROR: Failed to enable ADXL345 "
+            "measurement mode\n"
+        );
+
+        return;
+    }
+
+
+    /*------------------------------------------------------
      * Initialize Sensor Manager
      *-----------------------------------------------------*/
 
-    if (sensor_manager_init() != ESP_OK)
+    if (
+        sensor_manager_init() != ESP_OK
+    )
     {
         printf(
             "ERROR: Failed to initialize Sensor Manager\n"
@@ -303,21 +497,27 @@ void app_main(void)
         "System Initialized Successfully\n"
     );
 
+
     printf(
         "Sensor ODR          : %d Hz\n",
         SAMPLE_RATE_HZ
     );
+
 
     printf(
         "Window Size         : %d fresh samples\n",
         WINDOW_SIZE
     );
 
+
     printf(
         "Frequency Resolution: %.2f Hz\n",
-        (float)SAMPLE_RATE_HZ /
-        (float)WINDOW_SIZE
+        (
+            (float)SAMPLE_RATE_HZ /
+            (float)WINDOW_SIZE
+        )
     );
+
 
     printf(
         "Consensus Tolerance : +/- %.2f Hz\n\n",
@@ -357,28 +557,56 @@ void app_main(void)
 
 
     /*------------------------------------------------------
-     * Consensus result
+     * Consensus
      *-----------------------------------------------------*/
 
-    float consensus_frequency = 0.0f;
+    float consensus_frequency =
+        0.0f;
 
-    bool consensus_valid = false;
+    bool consensus_valid =
+        false;
+
+
+    /*------------------------------------------------------
+     * Frequency tracker
+     *-----------------------------------------------------*/
 
     frequency_tracker_t frequency_tracker;
 
-    if (frequency_tracker_init(&frequency_tracker) != ESP_OK)
+
+    if (
+        frequency_tracker_init(
+            &frequency_tracker
+        ) != ESP_OK
+    )
     {
-        printf("ERROR: Failed to initialize Frequency Tracker\n");
+        printf(
+            "ERROR: Failed to initialize Frequency Tracker\n"
+        );
+
         return;
     }
 
-    if (data_logger_init() != ESP_OK)
+
+    /*------------------------------------------------------
+     * Data logger
+     *-----------------------------------------------------*/
+
+    if (
+        data_logger_init() != ESP_OK
+    )
     {
-        printf("ERROR: Failed to initialize Data Logger\n");
+        printf(
+            "ERROR: Failed to initialize Data Logger\n"
+        );
+
         return;
     }
 
-    uint32_t window_number = 0;
+
+    uint32_t window_number =
+        0;
+
 
     /*------------------------------------------------------
      * Main acquisition loop
@@ -386,11 +614,20 @@ void app_main(void)
 
     while (1)
     {
-        int collected_samples = 0;
+        int collected_samples =
+            0;
 
-        int read_errors = 0;
 
-        int ready_timeouts = 0;
+        int read_errors =
+            0;
+
+
+        int ready_timeouts =
+            0;
+
+
+        int missed_samples =
+            0;
 
 
         int64_t window_start_us =
@@ -398,20 +635,32 @@ void app_main(void)
 
 
         /*--------------------------------------------------
-         * Collect WINDOW_SIZE fresh samples
+         * Collect one complete window
          *-------------------------------------------------*/
 
-        while (collected_samples < WINDOW_SIZE)
+        while (
+            collected_samples <
+            WINDOW_SIZE
+        )
         {
+            uint32_t data_ready_events =
+                0;
+
+
             esp_err_t err =
-                wait_for_data_ready();
+                adxl345_wait_for_data_ready(
+                    DATA_READY_TIMEOUT_MS,
+                    &data_ready_events
+                );
 
 
-            /*
+            /*----------------------------------------------
              * DATA_READY timeout
-             */
+             *---------------------------------------------*/
 
-            if (err == ESP_ERR_TIMEOUT)
+            if (
+                err == ESP_ERR_TIMEOUT
+            )
             {
                 ready_timeouts++;
 
@@ -419,11 +668,13 @@ void app_main(void)
             }
 
 
-            /*
-             * Error while checking DATA_READY
-             */
+            /*----------------------------------------------
+             * Other acquisition error
+             *---------------------------------------------*/
 
-            if (err != ESP_OK)
+            if (
+                err != ESP_OK
+            )
             {
                 read_errors++;
 
@@ -431,9 +682,31 @@ void app_main(void)
             }
 
 
-            /*
-             * Read fresh sample
-             */
+            /*----------------------------------------------
+             * More than one event accumulated.
+             *
+             * We only perform one current sensor read,
+             * so extra events indicate the acquisition
+             * task did not service every DATA_READY event
+             * individually.
+             *---------------------------------------------*/
+
+            if (
+                data_ready_events > 1
+            )
+            {
+                missed_samples +=
+                    (
+                        int
+                    )(
+                        data_ready_events - 1
+                    );
+            }
+
+
+            /*----------------------------------------------
+             * Read the current XYZ sample
+             *---------------------------------------------*/
 
             err =
                 sensor_manager_read(
@@ -441,7 +714,9 @@ void app_main(void)
                 );
 
 
-            if (err != ESP_OK)
+            if (
+                err != ESP_OK
+            )
             {
                 read_errors++;
 
@@ -449,35 +724,43 @@ void app_main(void)
             }
 
 
-            /*
-             * Store X axis
-             */
+            /*----------------------------------------------
+             * Store X
+             *---------------------------------------------*/
 
-            x_window[collected_samples] =
+            x_window[
+                collected_samples
+            ] =
                 sample.x_g;
 
 
-            /*
-             * Store Y axis
-             */
+            /*----------------------------------------------
+             * Store Y
+             *---------------------------------------------*/
 
-            y_window[collected_samples] =
+            y_window[
+                collected_samples
+            ] =
                 sample.y_g;
 
 
-            /*
-             * Store Z axis
-             */
+            /*----------------------------------------------
+             * Store Z
+             *---------------------------------------------*/
 
-            z_window[collected_samples] =
+            z_window[
+                collected_samples
+            ] =
                 sample.z_g;
 
 
-            /*
-             * Store vector magnitude
-             */
+            /*----------------------------------------------
+             * Store magnitude
+             *---------------------------------------------*/
 
-            magnitude_window[collected_samples] =
+            magnitude_window[
+                collected_samples
+            ] =
                 sample.magnitude_g;
 
 
@@ -486,7 +769,7 @@ void app_main(void)
 
 
         /*--------------------------------------------------
-         * Window timing
+         * End window timing
          *-------------------------------------------------*/
 
         int64_t window_end_us =
@@ -495,17 +778,18 @@ void app_main(void)
 
         float window_duration_ms =
             (
-                window_end_us -
-                window_start_us
-            )
-            /
-            1000.0f;
+                (float)(
+                    window_end_us -
+                    window_start_us
+                )
+                /
+                1000.0f
+            );
 
 
         /*==================================================
          * TIME-DOMAIN ANALYSIS
          *=================================================*/
-
 
         esp_err_t x_result =
             health_engine_analyze(
@@ -539,10 +823,12 @@ void app_main(void)
             );
 
 
-        if (x_result != ESP_OK ||
+        if (
+            x_result != ESP_OK ||
             y_result != ESP_OK ||
             z_result != ESP_OK ||
-            magnitude_result != ESP_OK)
+            magnitude_result != ESP_OK
+        )
         {
             printf(
                 "ERROR: Health Engine analysis failed\n"
@@ -555,7 +841,6 @@ void app_main(void)
         /*==================================================
          * X AXIS SIGNAL PROCESSING
          *=================================================*/
-
 
         esp_err_t x_dc_result =
             signal_processing_remove_dc(
@@ -586,7 +871,6 @@ void app_main(void)
          * Y AXIS SIGNAL PROCESSING
          *=================================================*/
 
-
         esp_err_t y_dc_result =
             signal_processing_remove_dc(
                 y_window,
@@ -615,7 +899,6 @@ void app_main(void)
         /*==================================================
          * Z AXIS SIGNAL PROCESSING
          *=================================================*/
-
 
         esp_err_t z_dc_result =
             signal_processing_remove_dc(
@@ -646,7 +929,8 @@ void app_main(void)
          * Verify signal-processing results
          *-------------------------------------------------*/
 
-        if (x_dc_result != ESP_OK ||
+        if (
+            x_dc_result != ESP_OK ||
             x_window_result != ESP_OK ||
             x_frequency_result != ESP_OK ||
 
@@ -656,7 +940,8 @@ void app_main(void)
 
             z_dc_result != ESP_OK ||
             z_window_result != ESP_OK ||
-            z_frequency_result != ESP_OK)
+            z_frequency_result != ESP_OK
+        )
         {
             printf(
                 "ERROR: Signal processing failed\n"
@@ -670,8 +955,9 @@ void app_main(void)
          * CONSENSUS ANALYSIS
          *=================================================*/
 
+        consensus_frequency =
+            0.0f;
 
-        consensus_frequency = 0.0f;
 
         consensus_valid =
             calculate_consensus_frequency(
@@ -681,6 +967,11 @@ void app_main(void)
                 &consensus_frequency
             );
 
+
+        /*==================================================
+         * FREQUENCY TRACKER
+         *=================================================*/
+
         esp_err_t tracker_result =
             frequency_tracker_update(
                 &frequency_tracker,
@@ -688,45 +979,98 @@ void app_main(void)
                 consensus_frequency
             );
 
-        if (tracker_result != ESP_OK)
+
+        if (
+            tracker_result != ESP_OK
+        )
         {
-            printf("ERROR: Frequency Tracker update failed\n");
+            printf(
+                "ERROR: Frequency Tracker update failed\n"
+            );
+
             continue;
         }
 
+
         window_number++;
 
-        data_logger_record_t log_record = {
-            .window_number = window_number,
-            .timestamp_ms = esp_timer_get_time() / 1000,
-            .x_metrics = x_metrics,
-            .y_metrics = y_metrics,
-            .z_metrics = z_metrics,
-            .magnitude_metrics = magnitude_metrics,
-            .x_frequency = x_frequency,
-            .y_frequency = y_frequency,
-            .z_frequency = z_frequency,
-            .consensus_valid = consensus_valid,
-            .consensus_frequency_hz = consensus_frequency,
-            .tracker_state = frequency_tracker.state,
-            .candidate_frequency_hz = frequency_tracker.candidate_frequency_hz,
-            .stable_frequency_hz = frequency_tracker.stable_frequency_hz,
-            .confirmation_count = frequency_tracker.confirmation_count,
-            .missed_window_count = frequency_tracker.missed_window_count
+
+        /*==================================================
+         * DATA LOGGER
+         *=================================================*/
+
+        data_logger_record_t log_record =
+        {
+            .window_number =
+                window_number,
+
+            .timestamp_ms =
+                esp_timer_get_time() /
+                1000,
+
+            .x_metrics =
+                x_metrics,
+
+            .y_metrics =
+                y_metrics,
+
+            .z_metrics =
+                z_metrics,
+
+            .magnitude_metrics =
+                magnitude_metrics,
+
+            .x_frequency =
+                x_frequency,
+
+            .y_frequency =
+                y_frequency,
+
+            .z_frequency =
+                z_frequency,
+
+            .consensus_valid =
+                consensus_valid,
+
+            .consensus_frequency_hz =
+                consensus_frequency,
+
+            .tracker_state =
+                frequency_tracker.state,
+
+            .candidate_frequency_hz =
+                frequency_tracker.candidate_frequency_hz,
+
+            .stable_frequency_hz =
+                frequency_tracker.stable_frequency_hz,
+
+            .confirmation_count =
+                frequency_tracker.confirmation_count,
+
+            .missed_window_count =
+                frequency_tracker.missed_window_count
         };
 
-        esp_err_t logger_result = data_logger_write(&log_record);
 
-        if (logger_result != ESP_OK)
+        esp_err_t logger_result =
+            data_logger_write(
+                &log_record
+            );
+
+
+        if (
+            logger_result != ESP_OK
+        )
         {
-            printf("ERROR: Data Logger write failed\n");
+            printf(
+                "ERROR: Data Logger write failed\n"
+            );
         }
 
 
         /*==================================================
          * PRINT REPORT
          *=================================================*/
-
 
         printf("\n");
 
@@ -790,7 +1134,6 @@ void app_main(void)
          * FREQUENCY REPORT
          *=================================================*/
 
-
         printf(
             "--------------------------------------\n"
         );
@@ -823,18 +1166,20 @@ void app_main(void)
          * CONSENSUS REPORT
          *=================================================*/
 
-
         printf(
             "--------------------------------------\n"
         );
 
 
-        if (consensus_valid)
+        if (
+            consensus_valid
+        )
         {
             printf(
                 "Consensus Frequency : %.2f Hz\n",
                 consensus_frequency
             );
+
 
             printf(
                 "Consensus Status    : CONFIRMED\n"
@@ -846,6 +1191,7 @@ void app_main(void)
                 "Consensus Frequency : NONE\n"
             );
 
+
             printf(
                 "Consensus Status    : UNCONFIRMED\n"
             );
@@ -856,7 +1202,10 @@ void app_main(void)
          * FREQUENCY TRACKER REPORT
          *=================================================*/
 
-        printf("--------------------------------------\n");
+        printf(
+            "--------------------------------------\n"
+        );
+
 
         printf(
             "Tracker State       : %s\n",
@@ -865,31 +1214,39 @@ void app_main(void)
             )
         );
 
-        if (frequency_tracker.state ==
-            FREQUENCY_STATE_CANDIDATE)
+
+        if (
+            frequency_tracker.state ==
+            FREQUENCY_STATE_CANDIDATE
+        )
         {
             printf(
                 "Candidate Frequency : %.2f Hz\n",
                 frequency_tracker.candidate_frequency_hz
             );
 
+
             printf(
                 "Confirmations       : %d / 3\n",
                 frequency_tracker.confirmation_count
             );
+
 
             printf(
                 "Missed Windows      : %d / 2\n",
                 frequency_tracker.missed_window_count
             );
         }
-        else if (frequency_tracker.state ==
-                 FREQUENCY_STATE_STABLE)
+        else if (
+            frequency_tracker.state ==
+            FREQUENCY_STATE_STABLE
+        )
         {
             printf(
                 "Stable Frequency    : %.2f Hz\n",
                 frequency_tracker.stable_frequency_hz
             );
+
 
             printf(
                 "Missed Windows      : %d / 2\n",
@@ -901,7 +1258,6 @@ void app_main(void)
         /*==================================================
          * ACQUISITION STATUS
          *=================================================*/
-
 
         printf(
             "--------------------------------------\n"
@@ -916,7 +1272,7 @@ void app_main(void)
 
 
         printf(
-            "Read Errors      : %d\n",
+            "I2C Read Errors  : %d\n",
             read_errors
         );
 
@@ -924,6 +1280,12 @@ void app_main(void)
         printf(
             "Ready Timeouts   : %d\n",
             ready_timeouts
+        );
+
+
+        printf(
+            "Missed Samples   : %d\n",
+            missed_samples
         );
 
 
