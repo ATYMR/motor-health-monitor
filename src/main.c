@@ -16,6 +16,7 @@
 #include "signal_processing.h"
 #include "frequency_tracker.h"
 #include "data_logger.h"
+#include "ds18b20.h"
 
 
 /*----------------------------------------------------------
@@ -28,6 +29,8 @@
 #define DATA_READY_TIMEOUT_MS      30
 
 #define CONSENSUS_TOLERANCE_HZ     1.0f
+
+#define DS18B20_GPIO               4
 
 
 /*----------------------------------------------------------
@@ -493,6 +496,28 @@ void app_main(void)
     }
 
 
+    /*------------------------------------------------------
+     * Initialize DS18B20 temperature sensor
+     *-----------------------------------------------------*/
+
+    if (
+        ds18b20_init(DS18B20_GPIO) != ESP_OK
+    )
+    {
+        printf(
+            "ERROR: Failed to initialize DS18B20\n"
+        );
+
+        return;
+    }
+
+
+    printf(
+        "DS18B20 initialized on GPIO %d\n",
+        DS18B20_GPIO
+    );
+
+
     printf(
         "System Initialized Successfully\n"
     );
@@ -530,6 +555,8 @@ void app_main(void)
      *-----------------------------------------------------*/
 
     sensor_sample_t sample;
+
+    float temperature_c = 0.0f;
 
 
     /*------------------------------------------------------
@@ -785,6 +812,33 @@ void app_main(void)
                 /
                 1000.0f
             );
+
+
+        /*==================================================
+         * DS18B20 TEMPERATURE
+         *==================================================*/
+
+        esp_err_t temperature_result =
+            ds18b20_read_temperature(
+                &temperature_c
+            );
+
+
+        if (
+            temperature_result != ESP_OK
+        )
+        {
+            printf(
+                "Temperature Read ERROR\n"
+            );
+        }
+        else
+        {
+            printf(
+                "Temperature       : %.2f °C\n",
+                temperature_c
+            );
+        }
 
 
         /*==================================================
