@@ -442,42 +442,23 @@ void app_main(void)
     }
 
 
-    /*------------------------------------------------------
-     * Configure ESP32 DATA_READY interrupt
-     *-----------------------------------------------------*/
-
-    if (
-        adxl345_configure_data_ready_interrupt(
-            ADXL345_INT1_GPIO
-        ) != ESP_OK
-    )
-    {
-        printf(
-            "ERROR: Failed to configure ADXL345 "
-            "DATA_READY GPIO %d\n",
-            ADXL345_INT1_GPIO
-        );
-
-        return;
-    }
-
 
     /*------------------------------------------------------
      * Enable measurement only AFTER the ESP32 interrupt
      * path is ready.
      *-----------------------------------------------------*/
 
-    if (
-        adxl345_enable_measurement() != ESP_OK
-    )
-    {
-        printf(
-            "ERROR: Failed to enable ADXL345 "
-            "measurement mode\n"
-        );
+    //if (
+   //     adxl345_enable_measurement() != ESP_OK
+    //)
+    //{
+    //    printf(
+     //       "ERROR: Failed to enable ADXL345 "
+      //      "measurement mode\n"
+      //  );
 
-        return;
-    }
+      //  return;
+   // }
 
 
     /*------------------------------------------------------
@@ -670,15 +651,35 @@ void app_main(void)
             WINDOW_SIZE
         )
         {
-            uint32_t data_ready_events =
-                0;
+            bool data_ready = false;
 
+esp_err_t err = adxl345_is_data_ready(&data_ready);
 
-            esp_err_t err =
-                adxl345_wait_for_data_ready(
-                    DATA_READY_TIMEOUT_MS,
-                    &data_ready_events
-                );
+if (err != ESP_OK) {
+    read_errors++;
+    vTaskDelay(pdMS_TO_TICKS(1));
+    continue;
+}
+
+if (!data_ready) {
+    ready_timeouts++;
+    vTaskDelay(pdMS_TO_TICKS(1));
+    continue;
+}
+
+err = sensor_manager_read(&sample);
+
+if (err != ESP_OK) {
+    read_errors++;
+    continue;
+}
+
+x_window[collected_samples] = sample.x_g;
+y_window[collected_samples] = sample.y_g;
+z_window[collected_samples] = sample.z_g;
+magnitude_window[collected_samples] = sample.magnitude_g;
+
+collected_samples++;
 
 
             /*----------------------------------------------
@@ -718,18 +719,7 @@ void app_main(void)
              * individually.
              *---------------------------------------------*/
 
-            if (
-                data_ready_events > 1
-            )
-            {
-                missed_samples +=
-                    (
-                        int
-                    )(
-                        data_ready_events - 1
-                    );
-            }
-
+            
 
             /*----------------------------------------------
              * Read the current XYZ sample
@@ -749,7 +739,6 @@ void app_main(void)
 
                 continue;
             }
-
 
             /*----------------------------------------------
              * Store X
