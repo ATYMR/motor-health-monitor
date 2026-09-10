@@ -2,8 +2,10 @@
 
 #include <math.h>
 
-
 #define PI_F 3.14159265358979323846f
+
+#define MIN_ANALYSIS_FREQUENCY_HZ 5.0f
+#define MAX_ANALYSIS_FREQUENCY_HZ 40.0f
 
 
 /*----------------------------------------------------------
@@ -23,26 +25,21 @@ esp_err_t signal_processing_remove_dc(
         return ESP_ERR_INVALID_ARG;
     }
 
-
     float sum = 0.0f;
-
 
     for (size_t i = 0; i < sample_count; i++)
     {
         sum += input_samples[i];
     }
 
-
     float mean =
         sum / (float)sample_count;
-
 
     for (size_t i = 0; i < sample_count; i++)
     {
         output_samples[i] =
             input_samples[i] - mean;
     }
-
 
     return ESP_OK;
 }
@@ -65,7 +62,6 @@ esp_err_t signal_processing_apply_hann_window(
         return ESP_ERR_INVALID_ARG;
     }
 
-
     for (size_t i = 0; i < sample_count; i++)
     {
         float coefficient =
@@ -78,11 +74,9 @@ esp_err_t signal_processing_apply_hann_window(
                 )
             );
 
-
         output_samples[i] =
             input_samples[i] * coefficient;
     }
-
 
     return ESP_OK;
 }
@@ -92,13 +86,14 @@ esp_err_t signal_processing_apply_hann_window(
  * Frequency Analysis
  *
  * V1 implementation:
- * Direct frequency calculation.
+ * Direct frequency calculation using DFT.
  *
- * This allows WINDOW_SIZE = 100.
- * Later this can be replaced by optimized FFT.
+ * The original V1 algorithm is preserved.
+ * Only the analysis band is constrained to 5-40 Hz
+ * to avoid obvious DC/edge-frequency artifacts.
  *---------------------------------------------------------*/
 
- esp_err_t signal_processing_analyze_frequency(
+esp_err_t signal_processing_analyze_frequency(
     const float *samples,
     size_t sample_count,
     float sample_rate_hz,
@@ -121,18 +116,77 @@ esp_err_t signal_processing_apply_hann_window(
 
 
     /*
-     * Analyze positive frequencies only.
+     * Calculate the valid analysis range in DFT bins.
      *
-     * Bin 0 is skipped because it represents DC.
+     * For the current configuration:
+     *
+     * sample_rate = 100 Hz
+     * sample_count = 100
+     * frequency resolution = 1 Hz/bin
+     *
+     * Therefore:
+     *
+     * 5 Hz  -> bin 5
+     * 40 Hz -> bin 40
      */
 
-    for (size_t k = 1;
-         k < sample_count / 2;
+    size_t min_bin =
+        (size_t)ceilf(
+            (MIN_ANALYSIS_FREQUENCY_HZ *
+             (float)sample_count) /
+            sample_rate_hz
+        );
+
+    size_t max_bin =
+        (size_t)floorf(
+            (MAX_ANALYSIS_FREQUENCY_HZ *
+             (float)sample_count) /
+            sample_rate_hz
+        );
+
+
+    /*
+     * Positive-frequency DFT bins only.
+     *
+     * Nyquist bin is excluded because the original V1
+     * implementation analyzed bins below sample_count / 2.
+     */
+
+    size_t positive_frequency_limit =
+        sample_count / 2;
+
+    if (positive_frequency_limit == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (min_bin < 1)
+    {
+        min_bin = 1;
+    }
+
+    if (max_bin >= positive_frequency_limit)
+    {
+        max_bin =
+            positive_frequency_limit - 1;
+    }
+
+    if (min_bin > max_bin)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+
+    /*
+     * Analyze only the selected frequency band.
+     */
+
+    for (size_t k = min_bin;
+         k <= max_bin;
          k++)
     {
         float real = 0.0f;
         float imaginary = 0.0f;
-
 
         for (size_t n = 0;
              n < sample_count;
@@ -145,15 +199,12 @@ esp_err_t signal_processing_apply_hann_window(
                 /
                 (float)sample_count;
 
-
             real +=
                 samples[n] * cosf(angle);
-
 
             imaginary -=
                 samples[n] * sinf(angle);
         }
-
 
         float amplitude =
             sqrtf(
@@ -161,15 +212,12 @@ esp_err_t signal_processing_apply_hann_window(
                 (imaginary * imaginary)
             );
 
-
         amplitude *=
             2.0f / (float)sample_count;
-
 
         spectrum_sum += amplitude;
 
         analyzed_bins++;
-
 
         if (amplitude > maximum_amplitude)
         {
@@ -186,7 +234,6 @@ esp_err_t signal_processing_apply_hann_window(
      */
 
     float average_noise_amplitude = 0.0f;
-
 
     if (analyzed_bins > 1)
     {
@@ -207,7 +254,6 @@ esp_err_t signal_processing_apply_hann_window(
 
     float confidence_ratio = 0.0f;
 
-
     if (average_noise_amplitude > 0.000001f)
     {
         confidence_ratio =
@@ -226,10 +272,8 @@ esp_err_t signal_processing_apply_hann_window(
         /
         (float)sample_count;
 
-
     metrics->dominant_amplitude =
         maximum_amplitude;
-
 
     metrics->confidence_ratio =
         confidence_ratio;
@@ -238,9 +282,7 @@ esp_err_t signal_processing_apply_hann_window(
     /*
      * V1 peak-validity rule.
      *
-     * This is deliberately a relative threshold.
-     * We will tune it using stationary and
-     * controlled-vibration test data.
+     * Preserve the original confidence threshold.
      */
 
     metrics->valid_peak =
