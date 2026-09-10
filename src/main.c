@@ -444,21 +444,24 @@ void app_main(void)
 
 
     /*------------------------------------------------------
-     * Enable measurement only AFTER the ESP32 interrupt
-     * path is ready.
+     * Enable measurement mode.
+     *
+     * The ADXL345 remains in standby until the Measure bit
+     * is enabled. Without this call, no new samples are
+     * generated and DATA_READY never becomes active.
      *-----------------------------------------------------*/
 
-    //if (
-   //     adxl345_enable_measurement() != ESP_OK
-    //)
-    //{
-    //    printf(
-     //       "ERROR: Failed to enable ADXL345 "
-      //      "measurement mode\n"
-      //  );
+    if (
+        adxl345_enable_measurement() != ESP_OK
+    )
+    {
+        printf(
+            "ERROR: Failed to enable ADXL345 "
+            "measurement mode\n"
+        );
 
-      //  return;
-   // }
+        return;
+    }
 
 
     /*------------------------------------------------------
@@ -653,73 +656,32 @@ void app_main(void)
         {
             bool data_ready = false;
 
-esp_err_t err = adxl345_is_data_ready(&data_ready);
+            esp_err_t err =
+                adxl345_is_data_ready(
+                    &data_ready
+                );
 
-if (err != ESP_OK) {
-    read_errors++;
-    vTaskDelay(pdMS_TO_TICKS(1));
-    continue;
-}
-
-if (!data_ready) {
-    ready_timeouts++;
-    vTaskDelay(pdMS_TO_TICKS(1));
-    continue;
-}
-
-err = sensor_manager_read(&sample);
-
-if (err != ESP_OK) {
-    read_errors++;
-    continue;
-}
-
-x_window[collected_samples] = sample.x_g;
-y_window[collected_samples] = sample.y_g;
-z_window[collected_samples] = sample.z_g;
-magnitude_window[collected_samples] = sample.magnitude_g;
-
-collected_samples++;
-
-
-            /*----------------------------------------------
-             * DATA_READY timeout
-             *---------------------------------------------*/
-
-            if (
-                err == ESP_ERR_TIMEOUT
-            )
-            {
-                ready_timeouts++;
-
-                continue;
-            }
-
-
-            /*----------------------------------------------
-             * Other acquisition error
-             *---------------------------------------------*/
-
-            if (
-                err != ESP_OK
-            )
+            if (err != ESP_OK)
             {
                 read_errors++;
 
+                vTaskDelay(
+                    pdMS_TO_TICKS(1)
+                );
+
                 continue;
             }
 
+            if (!data_ready)
+            {
+                ready_timeouts++;
 
-            /*----------------------------------------------
-             * More than one event accumulated.
-             *
-             * We only perform one current sensor read,
-             * so extra events indicate the acquisition
-             * task did not service every DATA_READY event
-             * individually.
-             *---------------------------------------------*/
+                vTaskDelay(
+                    pdMS_TO_TICKS(1)
+                );
 
-            
+                continue;
+            }
 
             /*----------------------------------------------
              * Read the current XYZ sample
@@ -730,10 +692,7 @@ collected_samples++;
                     &sample
                 );
 
-
-            if (
-                err != ESP_OK
-            )
+            if (err != ESP_OK)
             {
                 read_errors++;
 
@@ -741,7 +700,7 @@ collected_samples++;
             }
 
             /*----------------------------------------------
-             * Store X
+             * Store the sample
              *---------------------------------------------*/
 
             x_window[
@@ -749,36 +708,20 @@ collected_samples++;
             ] =
                 sample.x_g;
 
-
-            /*----------------------------------------------
-             * Store Y
-             *---------------------------------------------*/
-
             y_window[
                 collected_samples
             ] =
                 sample.y_g;
-
-
-            /*----------------------------------------------
-             * Store Z
-             *---------------------------------------------*/
 
             z_window[
                 collected_samples
             ] =
                 sample.z_g;
 
-
-            /*----------------------------------------------
-             * Store magnitude
-             *---------------------------------------------*/
-
             magnitude_window[
                 collected_samples
             ] =
                 sample.magnitude_g;
-
 
             collected_samples++;
         }
