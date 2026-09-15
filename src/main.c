@@ -105,6 +105,37 @@ static void print_frequency_result(
 
 
 /*----------------------------------------------------------
+ * Print Top-N Spectral Peaks (Diagnostic)
+ *
+ * Read-only report helper. Does not affect detection,
+ * consensus, or the frequency tracker in any way.
+ *---------------------------------------------------------*/
+
+static void print_top_peaks(
+    const char *axis_name,
+    const spectral_peak_t *peaks,
+    size_t peaks_found
+)
+{
+    printf(
+        "%s Axis Top %d:\n",
+        axis_name,
+        (int)peaks_found
+    );
+
+    for (size_t i = 0; i < peaks_found; i++)
+    {
+        printf(
+            "  %d) %6.2f Hz | %.5f g\n",
+            (int)(i + 1),
+            peaks[i].frequency_hz,
+            peaks[i].amplitude_g
+        );
+    }
+}
+
+
+/*----------------------------------------------------------
  * Calculate Consensus Frequency
  *
  * V1 rule:
@@ -568,6 +599,19 @@ void app_main(void)
 
 
     /*------------------------------------------------------
+     * Top-N spectral peak diagnostic (read-only)
+     *-----------------------------------------------------*/
+
+    spectral_peak_t x_top_peaks[SIGNAL_PROCESSING_DIAGNOSTIC_PEAK_COUNT];
+    spectral_peak_t y_top_peaks[SIGNAL_PROCESSING_DIAGNOSTIC_PEAK_COUNT];
+    spectral_peak_t z_top_peaks[SIGNAL_PROCESSING_DIAGNOSTIC_PEAK_COUNT];
+
+    size_t x_top_peaks_found = 0;
+    size_t y_top_peaks_found = 0;
+    size_t z_top_peaks_found = 0;
+
+
+    /*------------------------------------------------------
      * Consensus
      *-----------------------------------------------------*/
 
@@ -853,6 +897,25 @@ void app_main(void)
             );
 
 
+        /*
+         * Diagnostic only - does not affect detection.
+         */
+        esp_err_t x_top_peaks_result =
+            signal_processing_top_peaks(
+                x_windowed,
+                WINDOW_SIZE,
+                (float)SAMPLE_RATE_HZ,
+                x_top_peaks,
+                SIGNAL_PROCESSING_DIAGNOSTIC_PEAK_COUNT,
+                &x_top_peaks_found
+            );
+
+        if (x_top_peaks_result != ESP_OK)
+        {
+            x_top_peaks_found = 0;
+        }
+
+
         /*==================================================
          * Y AXIS SIGNAL PROCESSING
          *=================================================*/
@@ -880,6 +943,25 @@ void app_main(void)
                 (float)SAMPLE_RATE_HZ,
                 &y_frequency
             );
+
+
+        /*
+         * Diagnostic only - does not affect detection.
+         */
+        esp_err_t y_top_peaks_result =
+            signal_processing_top_peaks(
+                y_windowed,
+                WINDOW_SIZE,
+                (float)SAMPLE_RATE_HZ,
+                y_top_peaks,
+                SIGNAL_PROCESSING_DIAGNOSTIC_PEAK_COUNT,
+                &y_top_peaks_found
+            );
+
+        if (y_top_peaks_result != ESP_OK)
+        {
+            y_top_peaks_found = 0;
+        }
 
 
         /*==================================================
@@ -911,8 +993,32 @@ void app_main(void)
             );
 
 
+        /*
+         * Diagnostic only - does not affect detection.
+         */
+        esp_err_t z_top_peaks_result =
+            signal_processing_top_peaks(
+                z_windowed,
+                WINDOW_SIZE,
+                (float)SAMPLE_RATE_HZ,
+                z_top_peaks,
+                SIGNAL_PROCESSING_DIAGNOSTIC_PEAK_COUNT,
+                &z_top_peaks_found
+            );
+
+        if (z_top_peaks_result != ESP_OK)
+        {
+            z_top_peaks_found = 0;
+        }
+
+
         /*--------------------------------------------------
          * Verify signal-processing results
+         *
+         * NOTE: the top-N diagnostic results are
+         * deliberately NOT included in this gate. A
+         * diagnostic failure must never skip a window's
+         * detection, tracker update, or logging.
          *-------------------------------------------------*/
 
         if (
@@ -1145,6 +1251,46 @@ void app_main(void)
         print_frequency_result(
             "Z",
             &z_frequency
+        );
+
+
+        /*==================================================
+         * TOP-5 SPECTRAL PEAK DIAGNOSTIC
+         *
+         * Read-only. For inspecting the actual spectrum
+         * shape - does not feed into detection, consensus,
+         * or the tracker.
+         *=================================================*/
+
+        printf(
+            "--------------------------------------\n"
+        );
+
+
+        printf(
+            "===== TOP %d SPECTRAL PEAKS (DIAG) =====\n",
+            SIGNAL_PROCESSING_DIAGNOSTIC_PEAK_COUNT
+        );
+
+
+        print_top_peaks(
+            "X",
+            x_top_peaks,
+            x_top_peaks_found
+        );
+
+
+        print_top_peaks(
+            "Y",
+            y_top_peaks,
+            y_top_peaks_found
+        );
+
+
+        print_top_peaks(
+            "Z",
+            z_top_peaks,
+            z_top_peaks_found
         );
 
 

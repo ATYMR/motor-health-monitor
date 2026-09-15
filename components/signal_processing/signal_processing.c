@@ -291,3 +291,174 @@ esp_err_t signal_processing_analyze_frequency(
 
     return ESP_OK;
 }
+
+
+/*----------------------------------------------------------
+ * Top-N Spectral Peak Diagnostic
+ *
+ * Read-only diagnostic function.
+ *
+ * Recomputes the DFT over the same 5-40 Hz analysis band
+ * used by signal_processing_analyze_frequency() above, and
+ * returns the N largest bins by amplitude, sorted
+ * descending.
+ *
+ * This function does not call, modify, or depend on
+ * signal_processing_analyze_frequency() in any way. It has
+ * no effect on confidence_ratio, valid_peak, consensus, or
+ * the frequency tracker - it exists purely to expose the
+ * full local spectrum for inspection.
+ *---------------------------------------------------------*/
+
+esp_err_t signal_processing_top_peaks(
+    const float *samples,
+    size_t sample_count,
+    float sample_rate_hz,
+    spectral_peak_t *peaks_out,
+    size_t max_peaks,
+    size_t *peaks_found
+)
+{
+    if (samples == NULL ||
+        peaks_out == NULL ||
+        peaks_found == NULL ||
+        sample_count < 4 ||
+        sample_rate_hz <= 0.0f ||
+        max_peaks == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t min_bin =
+        (size_t)ceilf(
+            (MIN_ANALYSIS_FREQUENCY_HZ *
+             (float)sample_count) /
+            sample_rate_hz
+        );
+
+    size_t max_bin =
+        (size_t)floorf(
+            (MAX_ANALYSIS_FREQUENCY_HZ *
+             (float)sample_count) /
+            sample_rate_hz
+        );
+
+    size_t positive_frequency_limit =
+        sample_count / 2;
+
+    if (positive_frequency_limit == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (min_bin < 1)
+    {
+        min_bin = 1;
+    }
+
+    if (max_bin >= positive_frequency_limit)
+    {
+        max_bin =
+            positive_frequency_limit - 1;
+    }
+
+    if (min_bin > max_bin)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t found_count = 0;
+
+
+    /*
+     * Same DFT as signal_processing_analyze_frequency(),
+     * duplicated intentionally so this diagnostic cannot
+     * change the behavior of the existing detection path.
+     */
+
+    for (size_t k = min_bin;
+         k <= max_bin;
+         k++)
+    {
+        float real = 0.0f;
+        float imaginary = 0.0f;
+
+        for (size_t n = 0;
+             n < sample_count;
+             n++)
+        {
+            float angle =
+                (2.0f * PI_F *
+                 (float)k *
+                 (float)n)
+                /
+                (float)sample_count;
+
+            real +=
+                samples[n] * cosf(angle);
+
+            imaginary -=
+                samples[n] * sinf(angle);
+        }
+
+        float amplitude =
+            sqrtf(
+                (real * real) +
+                (imaginary * imaginary)
+            );
+
+        amplitude *=
+            2.0f / (float)sample_count;
+
+        float frequency_hz =
+            ((float)k * sample_rate_hz) /
+            (float)sample_count;
+
+
+        /*
+         * Insertion into a small sorted (descending)
+         * top-N list. max_peaks is small (5), so a plain
+         * insertion pass is cheap enough to run every
+         * window without needing a real sort.
+         */
+
+        if (found_count < max_peaks)
+        {
+            size_t insert_index = found_count;
+
+            while (insert_index > 0 &&
+                   peaks_out[insert_index - 1].amplitude_g < amplitude)
+            {
+                peaks_out[insert_index] =
+                    peaks_out[insert_index - 1];
+
+                insert_index--;
+            }
+
+            peaks_out[insert_index].frequency_hz = frequency_hz;
+            peaks_out[insert_index].amplitude_g = amplitude;
+
+            found_count++;
+        }
+        else if (amplitude > peaks_out[max_peaks - 1].amplitude_g)
+        {
+            size_t insert_index = max_peaks - 1;
+
+            while (insert_index > 0 &&
+                   peaks_out[insert_index - 1].amplitude_g < amplitude)
+            {
+                peaks_out[insert_index] =
+                    peaks_out[insert_index - 1];
+
+                insert_index--;
+            }
+
+            peaks_out[insert_index].frequency_hz = frequency_hz;
+            peaks_out[insert_index].amplitude_g = amplitude;
+        }
+    }
+
+    *peaks_found = found_count;
+
+    return ESP_OK;
+}
